@@ -17,7 +17,11 @@
       margin: auto;
       background: #003399;
       border: 4px solid #003399;
-      touch-action: none;
+      touch-action: manipulation;
+      -webkit-user-select: none;
+         -moz-user-select: none;
+          -ms-user-select: none;
+              user-select: none;
     }
   </style>
 </head>
@@ -27,8 +31,7 @@
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 
-let gameState = "menu"; // 'menu', 'playing', 'gameover'
-
+let gameState = "menu";
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 
@@ -44,8 +47,17 @@ let head = { x: canvas.width / 2, y: canvas.height / 2 };
 let direction = { x: 1, y: 0 };
 
 let star;
-
+let speed = BASE_SPEED;
 let noteIndex = 0;
+let clickDisabledUntil = 0;
+let lastTapTime = 0;
+let celebrationCounter = 0;
+let starCooldown = 0;
+let celebrationAngle = 0;
+let lastCollectedStarPosition = null;
+let starCollectedThisFrame = false;
+let movingToCenter = false;
+
 const notes = [
   "E","E","F","G","G","F","E","D",
   "C","C","D","E","E","D","D",
@@ -57,6 +69,20 @@ const notes = [
   "C","C","D","E","D","C","C"
 ];
 
+const noteDurations = [
+  500,500,500,500,500,500,500,500,
+  500,500,500,500,750,250,1000,
+  500,500,500,500,500,500,500,500,
+  500,500,500,500,500,1000,500,
+  500,500,500,500,500,500,500,500,
+  500,500,500,500,500,500,500,500,1000,
+  500,500,500,500,500,500,500,500,
+  500,500,500,500,500,1000,500
+];
+
+let celebrationNoteIndex = 0;
+let celebrationNoteTimer = 0;
+
 const noteSounds = {
   C: new Audio("C.mp3"),
   D: new Audio("D.mp3"),
@@ -64,6 +90,7 @@ const noteSounds = {
   F: new Audio("F.mp3"),
   G: new Audio("G.mp3")
 };
+Object.values(noteSounds).forEach(s => s.load());
 
 function drawStar(cx, cy, spikes, outerRadius, innerRadius, color) {
   const step = Math.PI / spikes;
@@ -81,29 +108,23 @@ function drawStar(cx, cy, spikes, outerRadius, innerRadius, color) {
   ctx.fill();
 }
 
-function playNextNote() {
-  const note = notes[noteIndex % notes.length];
-  const audio = noteSounds[note];
-  if (audio) {
-    audio.currentTime = 0;
-    audio.play();
-  }
-  noteIndex++;
-}
-
 function randomStar() {
   const marginX = canvas.width * 0.1;
   const marginY = canvas.height * 0.1;
-  return {
-    x: Math.random() * (canvas.width - marginX * 2) + marginX,
-    y: Math.random() * (canvas.height - marginY * 2) + marginY
-  };
+  let newStar;
+  do {
+    newStar = {
+      x: Math.random() * (canvas.width - marginX * 2) + marginX,
+      y: Math.random() * (canvas.height - marginY * 2) + marginY
+    };
+  } while (lastCollectedStarPosition && Math.hypot(newStar.x - lastCollectedStarPosition.x, newStar.y - lastCollectedStarPosition.y) < spacing * 2);
+  return newStar;
 }
 
 function checkStarCollision() {
   const dx = head.x - star.x;
   const dy = head.y - star.y;
-  return Math.hypot(dx, dy) < 20;
+  return Math.hypot(dx, dy) < spacing;
 }
 
 function wrapAround(position) {
@@ -113,17 +134,28 @@ function wrapAround(position) {
   if (position.y > canvas.height) position.y -= canvas.height;
 }
 
-function checkSelfCollision() {
-  for (let i = Math.floor(spacing * 2); i < path.length; i++) {
-    const p = path[i];
-    const dx = head.x - p.x;
-    const dy = head.y - p.y;
-    if (Math.hypot(dx, dy) < spacing / 2) {
-      return true;
-    }
+function resizeCanvas() {
+  const prevWidth = canvas.width;
+  const prevHeight = canvas.height;
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  const scaleX = canvas.width / prevWidth;
+  const scaleY = canvas.height / prevHeight;
+  head.x *= scaleX;
+  head.y *= scaleY;
+  path = path.map(p => ({ x: p.x * scaleX, y: p.y * scaleY }));
+  spacing = Math.min(canvas.width, canvas.height) * 0.015;
+  const marginX = canvas.width * 0.1;
+  const marginY = canvas.height * 0.1;
+  if (
+    star.x < marginX || star.x > canvas.width - marginX ||
+    star.y < marginY || star.y > canvas.height - marginY
+  ) {
+    star = randomStar();
   }
-  return false;
 }
+
+window.addEventListener("resize", resizeCanvas);
 
 function resetGame() {
   snakeLength = 1;
@@ -131,37 +163,80 @@ function resetGame() {
   head = { x: canvas.width / 2, y: canvas.height / 2 };
   direction = { x: 1, y: 0 };
   star = randomStar();
+  lastCollectedStarPosition = null;
+  starCooldown = 10;
+  starCollectedThisFrame = true;
   noteIndex = 0;
   speed = BASE_SPEED;
+  celebrationCounter = 0;
+  celebrationAngle = 0;
+  celebrationNoteIndex = 0;
+  celebrationNoteTimer = 0;
+  movingToCenter = false;
 }
 
-let speed = BASE_SPEED;
-
 function update() {
-  if (gameState !== "playing") return;
-  head.x += direction.x * speed;
-  head.y += direction.y * speed;
-  wrapAround(head);
+  if (starCooldown > 0) starCooldown--;
+  starCollectedThisFrame = false;
 
-  path.unshift({ x: head.x, y: head.y });
-  const maxPath = Math.floor(snakeLength * spacing);
-  if (path.length > maxPath) path.length = maxPath;
-
-  if (checkStarCollision()) {
-    snakeLength++;
-    star = randomStar();
-    speed = BASE_SPEED + (snakeLength - 1) * 0.2;
-  }
-
-  if (checkSelfCollision()) {
-    gameState = "menu";
+  if (gameState === "playing") {
+    if (movingToCenter) {
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      const dx = cx - head.x;
+      const dy = cy - head.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 5) {
+        head.x = cx;
+        head.y = cy;
+        gameState = "euCelebration";
+        clickDisabledUntil = Date.now() + 5000;
+      } else {
+        direction.x = dx / dist;
+        direction.y = dy / dist;
+        head.x += direction.x * speed;
+        head.y += direction.y * speed;
+      }
+    } else {
+      head.x += direction.x * speed;
+      head.y += direction.y * speed;
+      wrapAround(head);
+      path.unshift({ x: head.x, y: head.y });
+      const maxPath = Math.floor(snakeLength * spacing);
+      if (path.length > maxPath) path.length = maxPath;
+      if (starCooldown <= 0 && !starCollectedThisFrame && checkStarCollision()) {
+        lastCollectedStarPosition = { x: star.x, y: star.y };
+        snakeLength++;
+        star = randomStar();
+        starCooldown = 10;
+        speed = BASE_SPEED + (snakeLength - 1) * 0.2;
+        if (snakeLength === 13) {
+          movingToCenter = true;
+        }
+      }
+    }
+  } else if (gameState === "euCelebration") {
+    celebrationAngle += 0.01;
+    celebrationCounter += 0.05;
+    if (celebrationNoteTimer <= 0) {
+      const note = notes[celebrationNoteIndex % notes.length];
+      const audio = noteSounds[note];
+      if (audio && audio.readyState >= 2) {
+        audio.pause();
+        audio.currentTime = 0;
+        audio.play();
+      }
+      celebrationNoteTimer = noteDurations[celebrationNoteIndex % noteDurations.length] / 1000 * 1.5;
+      celebrationNoteIndex++;
+    } else {
+      celebrationNoteTimer -= 0.05;
+    }
   }
 }
 
 function draw() {
   ctx.fillStyle = BG_COLOR;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-
   if (gameState === "menu") {
     ctx.fillStyle = STAR_COLOR;
     ctx.font = "bold 32px Arial";
@@ -171,26 +246,41 @@ function draw() {
     ctx.fillText("Tap to Start", canvas.width / 2, canvas.height / 2 + 20);
     return;
   }
-
   const starOuter = spacing;
   const starInner = starOuter * 0.45;
-
-  for (let i = 0; i < path.length; i += Math.floor(spacing)) {
-    const p = path[i];
+  if (gameState === "euCelebration") {
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2;
+    const r = Math.min(canvas.width, canvas.height) * 0.25;
+    const numStars = 12;
+    for (let i = 0; i < numStars; i++) {
+      const angle = celebrationAngle + (Math.PI * 2 * i) / numStars;
+      const x = cx + r * Math.cos(angle);
+      const y = cy + r * Math.sin(angle);
+      drawStar(x, y, 5, starOuter, starInner, STAR_COLOR);
+    }
+    return;
+  }
+  for (let i = 0; i < snakeLength && i < path.length; i++) {
+    const p = path[i * Math.floor(spacing)] || path[path.length - 1];
     drawStar(p.x, p.y, 5, starOuter, starInner, STAR_COLOR);
   }
-
   drawStar(star.x, star.y, 5, starOuter * 1.2, starInner * 1.2, STAR_COLOR);
 }
 
-function loop() {
-  update();
-  draw();
+let lastFrameTime = 0;
+function loop(timestamp) {
+  if (timestamp - lastFrameTime > 1000 / 60) {
+    update();
+    draw();
+    lastFrameTime = timestamp;
+  }
   requestAnimationFrame(loop);
 }
 
 canvas.addEventListener("click", e => {
-  if (gameState === "menu") {
+  if (Date.now() < clickDisabledUntil) return;
+  if (gameState === "menu" || gameState === "gameover" || gameState === "euCelebration") {
     resetGame();
     gameState = "playing";
     return;
@@ -203,64 +293,19 @@ canvas.addEventListener("click", e => {
   const angle = Math.atan2(dy, dx);
   direction.x = Math.cos(angle);
   direction.y = Math.sin(angle);
-  playNextNote();
+  const note = notes[noteIndex % notes.length];
+  const audio = noteSounds[note];
+  if (audio && audio.readyState >= 2) {
+    audio.pause();
+    audio.currentTime = 0;
+    audio.play();
+  }
+  noteIndex++;
 });
 
-canvas.addEventListener("touchstart", e => {
-  if (gameState === "menu") {
-    resetGame();
-    gameState = "playing";
-    return;
-  }
-  if (e.touches.length > 0) {
-    const t = e.touches[0];
-    const rect = canvas.getBoundingClientRect();
-    const tx = t.clientX - rect.left;
-    const ty = t.clientY - rect.top;
-    const dx = tx - head.x;
-    const dy = ty - head.y;
-    const angle = Math.atan2(dy, dx);
-    direction.x = Math.cos(angle);
-    direction.y = Math.sin(angle);
-    playNextNote();
-  }
-}, { passive: false });
-
-function resizeCanvas() {
-  const prevWidth = canvas.width;
-  const prevHeight = canvas.height;
-
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
-
-  const scaleX = canvas.width / prevWidth;
-  const scaleY = canvas.height / prevHeight;
-
-  head.x *= scaleX;
-  head.y *= scaleY;
-  path = path.map(p => ({ x: p.x * scaleX, y: p.y * scaleY }));
-
-  spacing = Math.min(canvas.width, canvas.height) * 0.015;
-
-  const marginX = canvas.width * 0.1;
-  const marginY = canvas.height * 0.1;
-  if (
-    star.x < marginX ||
-    star.x > canvas.width - marginX ||
-    star.y < marginY ||
-    star.y > canvas.height - marginY
-  ) {
-    star = randomStar();
-  }
-}
-
-window.addEventListener("resize", resizeCanvas);
-
 resetGame();
-gameState = "menu";
 resizeCanvas();
 loop();
 </script>
 </body>
 </html>
-
